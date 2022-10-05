@@ -14,29 +14,66 @@
    limitations under the License.
 */
 
+#if defined(ANTELOPE)
+#include <eosio/eosio.hpp>
+#include <eosio/crypto.hpp>
+#include <silkworm/common/endian.hpp>
+#endif
+
 #include "precompile.h"
 
+#if not defined(ANTELOPE)
 #include <gmp.h>
+#endif
 
 #include <algorithm>
 #include <cstring>
 #include <limits>
 
 #include <intx/intx.hpp>
+#include <silkpre/ecdsa.h>
+#include <silkpre/secp256k1n.hpp>
+
+#if defined(ANTELOPE)
+namespace eosio {
+   namespace internal_use_do_not_use {
+    extern "C" {
+      __attribute__((eosio_wasm_import))
+      int32_t alt_bn128_add( const char* op1, uint32_t op1_len, const char* op2, uint32_t op2_len, char* result, uint32_t result_len);
+
+      __attribute__((eosio_wasm_import))
+      int32_t alt_bn128_mul( const char* g1, uint32_t g1_len, const char* scalar, uint32_t scalar_len, char* result, uint32_t result_len);
+
+      __attribute__((eosio_wasm_import))
+      int32_t alt_bn128_pair( const char* pairs, uint32_t pairs_len);
+
+      __attribute__((eosio_wasm_import))
+      int32_t mod_exp( const char* base, uint32_t base_len, const char* exp, uint32_t exp_len, const char* mod, uint32_t mod_len, char* result, uint32_t result_len);
+
+      __attribute__((eosio_wasm_import))
+      int32_t blake2_f( uint32_t rounds, const char* state, uint32_t state_len, const char* msg, uint32_t msg_len, 
+                  const char* t0_offset, uint32_t t0_len, const char* t1_offset, uint32_t t1_len, int32_t final, char* result, uint32_t result_len);
+
+      __attribute__((eosio_wasm_import))
+      void sha3( const char* data, uint32_t data_len, char* hash, uint32_t hash_len, int32_t keccak );
+   }
+  }
+}
+#else
 #include <libff/algebra/curves/alt_bn128/alt_bn128_pairing.hpp>
 #include <libff/algebra/curves/alt_bn128/alt_bn128_pp.hpp>
 #include <libff/common/profiling.hpp>
-
 #include <silkpre/blake2b.h>
-#include <silkpre/ecdsa.h>
 #include <silkpre/rmd160.h>
-#include <silkpre/secp256k1n.hpp>
 #include <silkpre/sha256.h>
+#endif
 
+#if not defined(ANTELOPE)
 enum {
     EVMC_ISTANBUL = 7,
     EVMC_BERLIN = 8,
 };
+#endif
 
 static void right_pad(std::basic_string<uint8_t>& str, const size_t min_size) noexcept {
     if (str.length() < min_size) {
@@ -66,10 +103,16 @@ SilkpreOutput silkpre_ecrec_run(const uint8_t* input, size_t len) {
     }
 
     std::memset(out, 0, 12);
+    #if defined(ANTELOPE)
+    if (!silkpre_recover_address(out + 12, &d[0], &d[64], v != 27)) {
+        return {out, 0};
+    }
+    #else
     static secp256k1_context* context{secp256k1_context_create(SILKPRE_SECP256K1_CONTEXT_FLAGS)};
     if (!silkpre_recover_address(out + 12, &d[0], &d[64], v != 27, context)) {
         return {out, 0};
     }
+    #endif
     return {out, 32};
 }
 
@@ -77,7 +120,12 @@ uint64_t silkpre_sha256_gas(const uint8_t*, size_t len, int) { return 60 + 12 * 
 
 SilkpreOutput silkpre_sha256_run(const uint8_t* input, size_t len) {
     uint8_t* out{static_cast<uint8_t*>(std::malloc(32))};
+    #if defined(ANTELOPE)
+    auto res = eosio::sha256((const char*)input, len).extract_as_byte_array();
+    memcpy(out, res.data(), 32);
+    #else
     silkpre_sha256(out, input, len, /*use_cpu_extensions=*/true);
+    #endif
     return {out, 32};
 }
 
@@ -86,7 +134,12 @@ uint64_t silkpre_rip160_gas(const uint8_t*, size_t len, int) { return 600 + 120 
 SilkpreOutput silkpre_rip160_run(const uint8_t* input, size_t len) {
     uint8_t* out{static_cast<uint8_t*>(std::malloc(32))};
     std::memset(out, 0, 12);
+    #if defined(ANTELOPE)
+    auto res = eosio::ripemd160((const char*)input, len).extract_as_byte_array();
+    memcpy(out+12, res.data(), res.size());
+    #else
     silkpre_rmd160(&out[12], input, len);
+    #endif
     return {out, 32};
 }
 
@@ -197,7 +250,22 @@ SilkpreOutput silkpre_expmod_run(const uint8_t* ptr, size_t len) {
     }
 
     right_pad(input, base_len + exponent_len + modulus_len);
+    #if defined(ANTELOPE)
+    auto base_data     = (const char*)input.data();
+    auto exponent_data = base_data + base_len;
+    auto modulus_data  = exponent_data + exponent_len;
 
+    uint8_t* out{static_cast<uint8_t*>(std::malloc(modulus_len))};
+    std::memset(out, 0, modulus_len);
+    
+    auto err = eosio::internal_use_do_not_use::mod_exp(base_data, base_len, exponent_data, exponent_len, modulus_data, modulus_len, (char*)out, modulus_len);
+    if(err < 0) {
+        free(out);
+        return {nullptr, 0};
+    }
+
+    return {out, static_cast<size_t>(modulus_len)};
+    #else
     mpz_t base;
     mpz_init(base);
     if (base_len) {
@@ -243,8 +311,10 @@ SilkpreOutput silkpre_expmod_run(const uint8_t* ptr, size_t len) {
     mpz_clear(base);
 
     return {out, static_cast<size_t>(modulus_len)};
+    #endif
 }
 
+#if not defined(ANTELOPE)
 // Utility functions for zkSNARK related precompiled contracts.
 // See Yellow Paper, Appendix E "Precompiled Contracts", as well as
 // https://eips.ethereum.org/EIPS/eip-196
@@ -360,13 +430,27 @@ static std::basic_string<uint8_t> encode_g1_element(libff::alt_bn128_G1 p) noexc
     std::reverse(out.begin(), out.end());
     return out;
 }
+#endif
 
 uint64_t silkpre_bn_add_gas(const uint8_t*, size_t, int rev) { return rev >= EVMC_ISTANBUL ? 150 : 500; }
 
 SilkpreOutput silkpre_bn_add_run(const uint8_t* ptr, size_t len) {
     std::basic_string<uint8_t> input(ptr, len);
     right_pad(input, 128);
+    
+    #if defined(ANTELOPE)
+    auto op1_data = (const char*)input.data();
+    auto op2_data = op1_data + 64;
 
+    uint8_t* out{static_cast<uint8_t*>(std::malloc(64))};
+    auto err = eosio::internal_use_do_not_use::alt_bn128_add( op1_data, 64, op2_data, 64, (char *)out, 64);
+    if(err < 0) {
+        free(out);
+        return {nullptr, 0};
+    }
+
+    return {out, 64};
+    #else
     init_libff();
 
     std::optional<libff::alt_bn128_G1> x{decode_g1_element(input.data())};
@@ -385,6 +469,7 @@ SilkpreOutput silkpre_bn_add_run(const uint8_t* ptr, size_t len) {
     uint8_t* out{static_cast<uint8_t*>(std::malloc(res.length()))};
     std::memcpy(out, res.data(), res.length());
     return {out, res.length()};
+    #endif
 }
 
 uint64_t silkpre_bn_mul_gas(const uint8_t*, size_t, int rev) { return rev >= EVMC_ISTANBUL ? 6'000 : 40'000; }
@@ -392,7 +477,20 @@ uint64_t silkpre_bn_mul_gas(const uint8_t*, size_t, int rev) { return rev >= EVM
 SilkpreOutput silkpre_bn_mul_run(const uint8_t* ptr, size_t len) {
     std::basic_string<uint8_t> input(ptr, len);
     right_pad(input, 96);
+    
+    #if defined(ANTELOPE)
+    auto point_data  = (const char*)input.data();
+    auto scalar_data = point_data + 64;
 
+    uint8_t* out{static_cast<uint8_t*>(std::malloc(64))};
+    auto err = eosio::internal_use_do_not_use::alt_bn128_mul( point_data, 64, scalar_data, 32, (char *)out, 64);
+    if(err < 0) {
+        free(out);
+        return {nullptr, 0};
+    }
+
+    return {out, 64};
+    #else
     init_libff();
 
     std::optional<libff::alt_bn128_G1> x{decode_g1_element(input.data())};
@@ -408,6 +506,7 @@ SilkpreOutput silkpre_bn_mul_run(const uint8_t* ptr, size_t len) {
     uint8_t* out{static_cast<uint8_t*>(std::malloc(res.length()))};
     std::memcpy(out, res.data(), res.length());
     return {out, res.length()};
+    #endif
 }
 
 static constexpr size_t kSnarkvStride{192};
@@ -422,7 +521,19 @@ SilkpreOutput silkpre_snarkv_run(const uint8_t* input, size_t len) {
         return {nullptr, 0};
     }
     size_t k{len / kSnarkvStride};
+    #if defined(ANTELOPE)
+    auto err = eosio::internal_use_do_not_use::alt_bn128_pair( (const char*)input, len);
+    if(err < 0) {
+        return {nullptr, 0};
+    }
 
+    uint8_t* out{static_cast<uint8_t*>(std::malloc(32))};
+    std::memset(out, 0, 32);
+    if (err == 0) {
+        out[31] = 1;
+    }
+    return {out, 32};;
+    #else
     init_libff();
     using namespace libff;
 
@@ -452,6 +563,7 @@ SilkpreOutput silkpre_snarkv_run(const uint8_t* input, size_t len) {
         out[31] = 1;
     }
     return {out, 32};
+    #endif
 }
 
 uint64_t silkpre_blake2_f_gas(const uint8_t* input, size_t len, int) {
@@ -471,6 +583,21 @@ SilkpreOutput silkpre_blake2_f_run(const uint8_t* input, size_t len) {
         return {nullptr, 0};
     }
 
+    #if defined(ANTELOPE)
+    auto rounds    = silkworm::endian::load_big_u32(input);
+    auto state     = (const char *)input + 4;
+    auto message   = state + 64;
+    auto t0_offset = message + 128;
+    auto t1_offset = t0_offset + 8;
+
+    uint8_t* out{static_cast<uint8_t*>(std::malloc(64))};
+    auto err = eosio::internal_use_do_not_use::blake2_f(rounds, state, 64, message, 128, t0_offset, 8, t1_offset, 8, (bool)f, (char *)out, 64);
+    if(err < 0) {
+        free(out);
+        return {nullptr, 0};
+    }
+    return {out, 64};
+    #else
     SilkpreBlake2bState state{};
     if (f) {
         state.f[0] = std::numeric_limits<uint64_t>::max();
@@ -491,6 +618,7 @@ SilkpreOutput silkpre_blake2_f_run(const uint8_t* input, size_t len) {
     uint8_t* out{static_cast<uint8_t*>(std::malloc(64))};
     std::memcpy(&out[0], &state.h[0], 8 * 8);
     return {out, 64};
+    #endif
 }
 
 const SilkpreContract kSilkpreContracts[SILKPRE_NUMBER_OF_ISTANBUL_CONTRACTS] = {

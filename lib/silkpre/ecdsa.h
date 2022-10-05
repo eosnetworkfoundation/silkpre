@@ -19,7 +19,9 @@
 
 // See Yellow Paper, Appendix F "Signing Transactions"
 
+#ifndef ANTELOPE
 #include <secp256k1.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -28,7 +30,9 @@
 extern "C" {
 #endif
 
+#ifndef ANTELOPE
 enum { SILKPRE_SECP256K1_CONTEXT_FLAGS = (SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY) };
+#endif
 
 //! \brief Tries recover the address used for message signing
 //! \param [in] message : the signed message
@@ -36,6 +40,9 @@ enum { SILKPRE_SECP256K1_CONTEXT_FLAGS = (SECP256K1_CONTEXT_SIGN | SECP256K1_CON
 //! \param [in] odd_y_parity : whether y parity is odd
 //! \param [in] context: a pointer to an existing secp256k1 context
 //! \return Whether the recovery has succeeded
+#ifdef ANTELOPE
+bool silkpre_recover_address(uint8_t out[20], const uint8_t message[32], const uint8_t signature[64], bool odd_y_parity);
+#else
 bool silkpre_recover_address(uint8_t out[20], const uint8_t message[32], const uint8_t signature[64], bool odd_y_parity,
                              secp256k1_context* context);
 
@@ -44,6 +51,7 @@ bool silkpre_secp256k1_ecdh(
     uint8_t* output,
     const secp256k1_pubkey* public_key,
     const uint8_t* private_key);
+#endif
 
 #if defined(__cplusplus)
 }
